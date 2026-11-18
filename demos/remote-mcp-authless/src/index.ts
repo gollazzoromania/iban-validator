@@ -1,66 +1,68 @@
-import { McpServer } from "@modelcontextprotocol/server";
-import { createMcpHandler } from "agents/mcp/server";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createMcpHandler } from "agents/mcp";
 import { z } from "zod";
 
 function createServer() {
 	const server = new McpServer({
-		name: "Authless Calculator",
+		name: "Global IBAN Validator",
 		version: "1.0.0",
 	});
 
 	server.registerTool(
-		"add",
-		{ inputSchema: z.object({ a: z.number(), b: z.number() }) },
-		async ({ a, b }) => ({
-			content: [{ type: "text", text: String(a + b) }],
-		}),
-	);
-
-	server.registerTool(
-		"calculate",
+		"validate_iban",
 		{
+			description: "Validates any international IBAN bank account number mathematically using ISO 7064 MOD 97-10.",
 			inputSchema: z.object({
-				operation: z.enum(["add", "subtract", "multiply", "divide"]),
-				a: z.number(),
-				b: z.number(),
+				iban: z.string().describe("The IBAN string to validate, with or without spaces"),
 			}),
 		},
-		async ({ operation, a, b }) => {
-			let result: number;
-			switch (operation) {
-				case "add":
-					result = a + b;
-					break;
-				case "subtract":
-					result = a - b;
-					break;
-				case "multiply":
-					result = a * b;
-					break;
-				case "divide":
-					if (b === 0)
-						return {
-							content: [
-								{
-									type: "text",
-									text: "Error: Cannot divide by zero",
-								},
-							],
-						};
-					result = a / b;
-					break;
+		async ({ iban }) => {
+			const cleanIban = iban.replace(/\s+/g, "").toUpperCase();
+
+			if (!/^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$/.test(cleanIban)) {
+				return {
+					content: [{
+						type: "text",
+						text: JSON.stringify({ valid: false, iban: cleanIban, reason: "Invalid IBAN format or length" }),
+					}],
+				};
 			}
-			return { content: [{ type: "text", text: String(result) }] };
-		},
+
+			const rearranged = cleanIban.slice(4) + cleanIban.slice(0, 4);
+			const numericString = rearranged.replace(/[A-Z]/g, (char) => (char.charCodeAt(0) - 55).toString());
+
+			let remainder = 0;
+			for (let i = 0; i < numericString.length; i++) {
+				remainder = (remainder * 10 + parseInt(numericString[i], 10)) % 97;
+			}
+
+			const isValid = remainder === 1;
+			const countryCode = cleanIban.slice(0, 2);
+
+			return {
+				content: [{
+					type: "text",
+					text: JSON.stringify({
+						valid: isValid,
+						iban: cleanIban,
+						country: countryCode,
+						reason: isValid ? "Valid IBAN checksum" : "Invalid mathematical checksum",
+					}),
+				}],
+			};
+		}
 	);
 
 	return server;
 }
 
-const handler = createMcpHandler(createServer);
-
 export default {
-	fetch(request: Request, env: Env, ctx: ExecutionContext) {
-		return handler(request, env, ctx);
+	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+		const url = new URL(request.url);
+		if (url.pathname === "/mcp") {
+			const server = createServer();
+			return createMcpHandler(server)(request, env, ctx);
+		}
+		return new Response("Global IBAN Validator MCP Server is running!", { status: 200 });
 	},
-} satisfies ExportedHandler<Env>;
+};
